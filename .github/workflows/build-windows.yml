@@ -66,10 +66,15 @@ jobs:
           flutter --version
           flutter doctor -v
 
-      - name: Install LLVM
+      - name: Install LLVM and Clang
+        uses: KyleMayes/install-llvm-action@v2
+        with:
+          version: "15.0.6"
+
+      - name: Export LIBCLANG_PATH
+        shell: pwsh
         run: |
-          choco install -y llvm --version=18.1.8
-          "LIBCLANG_PATH=C:\Program Files\LLVM\bin" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "LIBCLANG_PATH=$env:LLVM_PATH\bin" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
       - name: Setup vcpkg
         run: |
