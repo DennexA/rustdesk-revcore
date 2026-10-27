@@ -1,0 +1,125 @@
+# Build RustDesk Windows x64 with RevCore server baked in (OSS, no Pro).
+# Upstream: rustdesk/rustdesk @ tag. Patch: RS_PUB_KEY + PROD_RENDEZVOUS_SERVER.
+
+name: Build Windows (RevCore)
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "rustdesk/rustdesk git tag"
+        required: true
+        default: "1.5.0"
+
+permissions:
+  contents: read
+
+env:
+  TAG: ${{ inputs.tag }}
+
+jobs:
+  windows-x64:
+    runs-on: windows-latest
+    timeout-minutes: 240
+    defaults:
+      run:
+        shell: pwsh
+
+    steps:
+      - name: Checkout rustdesk
+        uses: actions/checkout@v4
+        with:
+          repository: rustdesk/rustdesk
+          ref: ${{ env.TAG }}
+          submodules: recursive
+          fetch-depth: 1
+
+      - name: Checkout bake script
+        uses: actions/checkout@v4
+        with:
+          path: _revcore
+          sparse-checkout: |
+            scripts/bake_server.py
+          sparse-checkout-cone-mode: false
+
+      - name: Bake RevCore server + key
+        env:
+          RENDEZVOUS_SERVER: ${{ secrets.RENDEZVOUS_SERVER }}
+          RS_PUB_KEY: ${{ secrets.RS_PUB_KEY }}
+        run: |
+          python _revcore/scripts/bake_server.py
+          Select-String -Path libs/hbb_common/src/config.rs -Pattern 'RS_PUB_KEY|PROD_RENDEZVOUS_SERVER|RENDEZVOUS_SERVERS' | Select-Object -First 10
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+
+      - name: Flutter Windows desktop
+        run: |
+          flutter config --enable-windows-desktop
+          flutter --version
+          flutter doctor -v
+
+      - name: Install LLVM
+        run: |
+          choco install -y llvm --version=18.1.8
+          "LIBCLANG_PATH=C:\Program Files\LLVM\bin" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Setup vcpkg
+        run: |
+          git clone https://github.com/microsoft/vcpkg "$env:USERPROFILE\vcpkg"
+          & "$env:USERPROFILE\vcpkg\bootstrap-vcpkg.bat"
+          "VCPKG_ROOT=$env:USERPROFILE\vcpkg" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Cache vcpkg + cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/AppData/Local/vcpkg
+            ~/.cargo/registry
+            ~/.cargo/git
+            ${{ env.USERPROFILE }}/vcpkg/installed
+          key: win-vcpkg-cargo-${{ env.TAG }}-${{ hashFiles('**/Cargo.lock', 'vcpkg.json') }}
+
+      - name: Install vcpkg deps
+        run: |
+          $pkgs = @(
+            'libvpx:x64-windows-static',
+            'libyuv:x64-windows-static',
+            'opus:x64-windows-static',
+            'aom:x64-windows-static'
+          )
+          & "$env:VCPKG_ROOT\vcpkg.exe" install @pkgs
+
+      - name: Install flutter rust bridge / deps
+        run: |
+          cargo install flutter_rust_bridge_codegen --version 1.80.1 --locked --force
+          flutter pub get
+
+      - name: Generate bridge
+        run: |
+          # Official project uses build.py / flutter_rust_bridge; follow upstream Windows guide
+          python -c "print('bridge via cargo/flutter next')"
+          if (Test-Path build.py) { python build.py --flutter --skip-portable-pack 2>&1 | Tee-Object -FilePath build.log; if ($LASTEXITCODE -ne 0) { Get-Content build.log -Tail 80; exit $LASTEXITCODE } }
+          else { cargo build --release --features flutter }
+
+      - name: Collect artifacts
+        run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Get-ChildItem -Recurse -Include rustdesk.exe,RustDesk.exe,*.msi -ErrorAction SilentlyContinue |
+            Where-Object { $_.FullName -match 'release|flutter\\build|SignOutput|Release' } |
+            ForEach-Object { Copy-Item $_.FullName "dist\$($_.Name)" -Force; Write-Host "copied $($_.FullName)" }
+          Get-ChildItem dist
+
+      - name: Upload Windows artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: rustdesk-revcore-windows-${{ env.TAG }}
+          path: dist/*
+          if-no-files-found: warn
